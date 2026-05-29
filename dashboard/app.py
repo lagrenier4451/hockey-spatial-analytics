@@ -1,11 +1,12 @@
 """
 dashboard/app.py — Hockey Spatial Analytics Dashboard
 
-Four pages built on BDC 2025 tracking event data:
+Five pages built on BDC 2025 tracking event data:
   1. Overview    — event breakdown, rink map, game selector
   2. Shots       — shot scatter, heatmap, distance/angle analysis
   3. Passes      — pass arrows, direct vs indirect, zone flows
   4. Zone Entries — carry vs dump, entry success rates
+  5. Decision IQ  — spatial value surface, ΔV scores, team/player IQ
 
 Run locally:
     streamlit run dashboard/app.py --server.port 8551
@@ -27,6 +28,8 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from features.spatial import load_all_events
 from visualization.rink import draw_rink, draw_heatmap
+import matplotlib.cm as cm
+from matplotlib.colors import TwoSlopeNorm
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -70,6 +73,16 @@ def fig_to_streamlit(fig):
     plt.close(fig)
 
 
+@st.cache_data(show_spinner="Computing Decision IQ scores...")
+def get_scored_events() -> pd.DataFrame:
+    """
+    Score all events with ΔSpatial Value.
+    Cached once — reused across all Decision IQ page interactions.
+    """
+    from features.decision_iq import score_events
+    return score_events(get_events())
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("🏒 Hockey Spatial Analytics")
 st.sidebar.markdown("**Data:** Big Data Cup 2025 — Stathletes")
@@ -77,7 +90,7 @@ st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
     "Page",
-    ["Overview", "Shot Analysis", "Pass Analysis", "Zone Entries"],
+    ["Overview", "Shot Analysis", "Pass Analysis", "Zone Entries", "Decision IQ"],
 )
 
 all_events = get_events()
@@ -550,3 +563,245 @@ elif page == "Zone Entries":
             yaxis={"categoryorder": "total ascending"},
         )
         st.plotly_chart(fig_next, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 5 — DECISION IQ
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Decision IQ":
+    import plotly.express as px
+    from features.xg_model import get_model
+    from features.decision_iq import team_iq, player_iq, top_decisions
+
+    st.title("Decision IQ")
+    st.caption(
+        "Hockey IQ measured as ΔSpatial Value — did each decision move the puck "
+        "toward more dangerous space? A logistic regression danger model is trained "
+        "from shot locations in this dataset, then every pass, shot, and zone entry "
+        "is scored as the change in expected-goal probability it produced."
+    )
+
+    # Score all events (cached) then filter for display
+    scored_all = get_scored_events()
+    scored = (
+        scored_all.copy() if selected_game == "All Games"
+        else scored_all[scored_all["game_id"] == selected_game].copy()
+    )
+
+    # Pre-compute aggregations (always on full dataset for stability)
+    team_iq_df   = team_iq(scored_all)
+    player_iq_df = player_iq(scored_all)
+    best_dec, worst_dec = top_decisions(scored_all, n=5)
+
+    n_scored  = scored["delta_v"].notna().sum()
+    avg_dv    = float(scored["delta_v"].mean()) if n_scored > 0 else 0.0
+    best_team = team_iq_df.iloc[0]["team"] if not team_iq_df.empty else "—"
+
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Decisions Scored",      f"{n_scored:,}")
+    c2.metric("Avg ΔSpatial Value",    f"{avg_dv:+.4f}")
+    c3.metric("Highest Team IQ",       best_team)
+
+    st.markdown("---")
+
+    # ── Section 1: Danger Surface ─────────────────────────────────────────────
+    st.subheader("Ice Danger Surface  (Spatial Value)")
+    st.caption(
+        "Every point on the rink has a Spatial Value xV — the probability a shot "
+        "from here results in a goal.  Brighter = more dangerous.  "
+        "This surface is the reference for all ΔV calculations below."
+    )
+
+    model = get_model(scored_all)
+    xs_surf, ys_surf, vals_surf = model.danger_surface(nx=80, ny=40)
+
+    fig_surf, ax_surf = draw_rink(figsize=(13, 5))
+    ax_surf.imshow(
+        vals_surf,
+        origin="lower",
+        extent=[-100, 100, -42.5, 42.5],
+        cmap="hot",
+        alpha=0.60,
+        aspect="auto",
+        zorder=2,
+        interpolation="bilinear",
+    )
+    ax_surf.set_title(
+        "xV(x, y) = P(goal | shot taken from here)  ·  brighter = more dangerous",
+        fontsize=9, style="italic",
+    )
+    fig_to_streamlit(fig_surf)
+
+    st.caption(
+        f"Model: logistic regression · trained on **{model.n_shots} shots** "
+        f"and **{model.n_goals} goals** · features: distance + angle to nearest goal"
+    )
+
+    st.markdown("---")
+
+    # ── Section 2: Decision Quality Map ──────────────────────────────────────
+    st.subheader("Pass Decision Quality Map")
+    st.caption(
+        "Each arrow = one pass. "
+        "🟢 Green arrows moved the puck toward danger (positive ΔV). "
+        "🔴 Red arrows moved it away from danger (negative ΔV). "
+        "Yellow = roughly neutral."
+    )
+
+    pass_dec = scored[
+        (scored["decision_type"] == "Pass") &
+        scored["delta_v"].notna() &
+        scored["abs_x"].notna() &
+        scored["abs_x2"].notna()
+    ].copy()
+
+    max_arrows_diq = st.sidebar.slider(
+        "Max decision arrows", 50, 400, 150, step=50, key="diq_arrows"
+    )
+    if len(pass_dec) > max_arrows_diq:
+        pass_dec = pass_dec.sample(max_arrows_diq, random_state=42)
+
+    fig_dmap, ax_dmap = draw_rink(figsize=(13, 5))
+
+    norm_dv = TwoSlopeNorm(vmin=-0.12, vcenter=0.0, vmax=0.15)
+    cmap_dv = cm.RdYlGn
+
+    for _, row in pass_dec.iterrows():
+        color = cmap_dv(norm_dv(float(row["delta_v"])))
+        ax_dmap.annotate(
+            "",
+            xy=(row["abs_x2"], row["abs_y2"]),
+            xytext=(row["abs_x"], row["abs_y"]),
+            arrowprops=dict(
+                arrowstyle="->", color=color, alpha=0.50, lw=0.9,
+            ),
+        )
+    ax_dmap.set_title(
+        f"n = {len(pass_dec)} pass decisions sampled",
+        fontsize=9, style="italic",
+    )
+    fig_to_streamlit(fig_dmap)
+
+    st.markdown("---")
+
+    # ── Section 3: Team IQ ────────────────────────────────────────────────────
+    st.subheader("Team Decision IQ")
+    st.caption("Primary view — always computed across all three games for statistical stability.")
+
+    col_t1, col_t2 = st.columns([1, 2])
+
+    with col_t1:
+        fig_team = px.bar(
+            team_iq_df,
+            x="decision_iq",
+            y="team",
+            orientation="h",
+            color="decision_iq",
+            color_continuous_scale=[[0.0, "#C00000"], [0.5, "#5B9BD5"], [1.0, "#1A3A5C"]],
+            text=team_iq_df["decision_iq"].round(1).astype(str),
+            labels={"decision_iq": "Decision IQ (0–100)", "team": "Team"},
+            title="Overall Decision IQ",
+        )
+        fig_team.update_traces(textposition="outside")
+        fig_team.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            coloraxis_showscale=False, showlegend=False, height=360,
+            yaxis={"categoryorder": "total ascending"},
+        )
+        st.plotly_chart(fig_team, use_container_width=True)
+
+    with col_t2:
+        breakdown_cols = [c for c in ["pass_dv", "shot_dv", "entry_dv"]
+                          if c in team_iq_df.columns]
+        if breakdown_cols:
+            melt_df = team_iq_df[["team"] + breakdown_cols].melt(
+                id_vars="team", var_name="Type", value_name="Mean ΔV"
+            )
+            melt_df["Type"] = melt_df["Type"].map({
+                "pass_dv":  "Pass",
+                "shot_dv":  "Shot",
+                "entry_dv": "Zone Entry",
+            })
+            fig_breakdown = px.bar(
+                melt_df, x="team", y="Mean ΔV", color="Type",
+                barmode="group",
+                color_discrete_map={
+                    "Pass": BLUE, "Shot": GOLD, "Zone Entry": "#27AE60",
+                },
+                labels={"team": "Team", "Mean ΔV": "Mean ΔV"},
+                title="Decision IQ Breakdown by Type",
+            )
+            fig_breakdown.add_hline(
+                y=0, line_dash="dash", line_color="white",
+                opacity=0.4, annotation_text="neutral",
+            )
+            fig_breakdown.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                height=360,
+            )
+            st.plotly_chart(fig_breakdown, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Section 4: Player IQ ─────────────────────────────────────────────────
+    st.subheader("Player Decision IQ")
+    st.info(
+        "⚠️ **Small sample caveat** — 3 games yields ~15–25 decisions per player. "
+        "Treat individual scores as directional, not definitive.  "
+        "Bubble size = number of decisions scored."
+    )
+
+    player_iq_df["label"] = "P-" + player_iq_df["player_id"].astype(str)
+
+    fig_player = px.scatter(
+        player_iq_df,
+        x="n_decisions",
+        y="decision_iq",
+        color="team",
+        size="n_decisions",
+        size_max=28,
+        text="label",
+        hover_data={
+            "label": True,
+            "mean_dv": ":.4f",
+            "n_decisions": True,
+            "team": True,
+        },
+        labels={
+            "n_decisions": "Decisions Scored (sample size)",
+            "decision_iq": "Decision IQ (0–100)",
+            "team": "Team",
+        },
+        title="Player Decision IQ vs Sample Size",
+    )
+    fig_player.update_traces(textposition="top center", textfont_size=8)
+    fig_player.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        height=440,
+    )
+    st.plotly_chart(fig_player, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Section 5: Best & Worst Decisions ────────────────────────────────────
+    st.subheader("Best & Worst Individual Decisions")
+    st.caption("Ranked by ΔSpatial Value — how much danger a single decision created or surrendered.")
+
+    def _fmt_decision_table(dec_df: pd.DataFrame) -> pd.DataFrame:
+        out = dec_df[[
+            "player_id", "team", "decision_type", "delta_v", "game_id"
+        ]].copy()
+        out["player_id"]  = "P-" + out["player_id"].astype(str)
+        out["delta_v"]    = out["delta_v"].round(4)
+        out.columns       = ["Player", "Team", "Decision", "ΔV", "Game"]
+        return out
+
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        st.markdown("**🟢 Top 5 — Highest ΔV (Best Decisions)**")
+        st.dataframe(_fmt_decision_table(best_dec), hide_index=True)
+    with col_b2:
+        st.markdown("**🔴 Bottom 5 — Lowest ΔV (Poorest Decisions)**")
+        st.dataframe(_fmt_decision_table(worst_dec), hide_index=True)
