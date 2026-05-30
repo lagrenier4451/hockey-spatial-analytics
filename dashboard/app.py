@@ -22,8 +22,8 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")   # must be set before pyplot import
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import streamlit as st
+import plotly.express as px
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from features.spatial import load_all_events
@@ -166,8 +166,6 @@ if page == "Overview":
         st.subheader("Events by Type")
         counts = df["event"].value_counts().reset_index()
         counts.columns = ["event", "count"]   # consistent regardless of pandas version
-        # plotly bar for interactivity
-        import plotly.express as px
         fig_bar = px.bar(
             counts, x="count", y="event",
             orientation="h",
@@ -188,8 +186,7 @@ if page == "Overview":
     # ── Zone breakdown ─────────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("Event Distribution by Zone")
-    zone_counts = df.groupby(["zone", "event"]).size().reset_index(name="n")
-    import plotly.express as px
+    zone_counts = df.groupby(["zone", "event"], observed=True).size().reset_index(name="n")
     fig_zone = px.bar(
         zone_counts, x="zone", y="n", color="event",
         color_discrete_map=EVENT_COLORS,
@@ -264,7 +261,6 @@ elif page == "Shot Analysis":
     # ── Distance + angle distributions ────────────────────────────────────────
     st.markdown("---")
     st.subheader("Shot Distance & Angle")
-    import plotly.express as px
 
     col3, col4 = st.columns(2)
     with col3:
@@ -351,8 +347,9 @@ elif page == "Pass Analysis":
     with col1:
         st.subheader("Completed Passes")
         fig, ax = draw_rink(figsize=(8, 4))
-        sample = complete.dropna(subset=["abs_x", "abs_x2"]).sample(
-            min(max_arrows, len(complete)), random_state=42
+        valid_complete = complete.dropna(subset=["abs_x", "abs_y", "abs_x2", "abs_y2"])
+        sample = valid_complete.sample(
+            min(max_arrows, len(valid_complete)), random_state=42
         )
         for _, row in sample.iterrows():
             ax.annotate(
@@ -369,8 +366,9 @@ elif page == "Pass Analysis":
     with col2:
         st.subheader("Incomplete Passes")
         fig2, ax2 = draw_rink(figsize=(8, 4))
-        sample_inc = incomplete.dropna(subset=["abs_x", "abs_x2"]).sample(
-            min(max_arrows, len(incomplete)), random_state=42
+        valid_incomplete = incomplete.dropna(subset=["abs_x", "abs_y", "abs_x2", "abs_y2"])
+        sample_inc = valid_incomplete.sample(
+            min(max_arrows, len(valid_incomplete)), random_state=42
         )
         for _, row in sample_inc.iterrows():
             ax2.annotate(
@@ -387,7 +385,6 @@ elif page == "Pass Analysis":
     # ── Direct vs Indirect ─────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("Direct vs Indirect Passes")
-    import plotly.express as px
 
     col3, col4 = st.columns(2)
     with col3:
@@ -404,7 +401,7 @@ elif page == "Pass Analysis":
 
     with col4:
         # Pass origin zone breakdown
-        zone_pass = complete.groupby("zone").size().reset_index(name="count")
+        zone_pass = complete.groupby("zone", observed=True).size().reset_index(name="count")
         fig_zone = px.bar(
             zone_pass, x="zone", y="count",
             color="zone",
@@ -460,8 +457,8 @@ elif page == "Zone Entries":
     with col1:
         st.subheader("Entry Locations — Controlled vs Dump")
         fig, ax = draw_rink(figsize=(8, 4))
-        valid_e = entries.dropna(subset=["abs_x"])
-        valid_d = dumps.dropna(subset=["abs_x"])
+        valid_e = entries.dropna(subset=["abs_x", "abs_y"])
+        valid_d = dumps.dropna(subset=["abs_x", "abs_y"])
         ax.scatter(valid_e["abs_x"], valid_e["abs_y"],
                    c=NAVY, s=50, alpha=0.65, zorder=5,
                    edgecolors="white", linewidths=0.4, label="Carry-in")
@@ -474,7 +471,6 @@ elif page == "Zone Entries":
 
     with col2:
         st.subheader("Entry Type Breakdown")
-        import plotly.express as px
 
         entry_types = entries["detail_1"].value_counts().reset_index()
         entry_types.columns = ["detail_1", "count"]
@@ -568,7 +564,6 @@ elif page == "Zone Entries":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Decision IQ":
-    import plotly.express as px
     from features.xg_model import get_model
     from features.decision_iq import team_iq, player_iq, top_decisions
 
