@@ -164,19 +164,14 @@ if page == "Overview":
 
     with col_right:
         st.subheader("Events by Type")
-        counts = (
-            df["event"].value_counts()
-            .reset_index()
-            .rename(columns={"index": "Event", "event": "Count",
-                             "count": "Count"})
-        )
+        counts = df["event"].value_counts().reset_index()
+        counts.columns = ["event", "count"]   # consistent regardless of pandas version
         # plotly bar for interactivity
         import plotly.express as px
         fig_bar = px.bar(
-            counts, x="count" if "count" in counts.columns else "Count",
-            y="event" if "event" in counts.columns else "Event",
+            counts, x="count", y="event",
             orientation="h",
-            color="event" if "event" in counts.columns else "Event",
+            color="event",
             color_discrete_map=EVENT_COLORS,
             labels={"event": "", "count": "# Events"},
         )
@@ -310,6 +305,7 @@ elif page == "Shot Analysis":
     st.markdown("---")
     st.subheader("Shot Type (Detail)")
     shot_types = shots_df["detail_1"].value_counts().reset_index()
+    shot_types.columns = ["detail_1", "count"]
     fig_type = px.bar(
         shot_types, x="detail_1", y="count",
         color_discrete_sequence=[NAVY],
@@ -396,6 +392,7 @@ elif page == "Pass Analysis":
     col3, col4 = st.columns(2)
     with col3:
         detail_counts = complete["detail_1"].value_counts().reset_index()
+        detail_counts.columns = ["detail_1", "count"]
         fig_detail = px.pie(
             detail_counts, values="count", names="detail_1",
             color_discrete_sequence=[NAVY, LBLUE, GOLD],
@@ -480,6 +477,7 @@ elif page == "Zone Entries":
         import plotly.express as px
 
         entry_types = entries["detail_1"].value_counts().reset_index()
+        entry_types.columns = ["detail_1", "count"]
         fig_e = px.bar(
             entry_types, x="count", y="detail_1",
             orientation="h",
