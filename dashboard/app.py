@@ -406,7 +406,7 @@ elif page == "Pass Analysis":
             zone_pass, x="zone", y="count",
             color="zone",
             color_discrete_map={
-                "Defensive": RED, "Neutral": LBLUE, "Offensive": NAVY,
+                "Left Zone": RED, "Neutral": LBLUE, "Right Zone": NAVY,
             },
             labels={"zone": "Zone of Origin", "count": "Passes"},
             title="Completed Passes by Zone",

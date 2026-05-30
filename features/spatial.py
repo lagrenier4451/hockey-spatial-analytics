@@ -1,46 +1,29 @@
 """
 features/spatial.py
 
-Coordinate normalisation and spatial feature engineering.
+Coordinate handling and spatial feature engineering.
 
-THE COORDINATE PROBLEM
-----------------------
-The BDC event data uses a per-team perspective:
-  X = 0   → eventing team's own goal
-  X = 100 → opponent's goal
-  Y ∈ [-42.5, +42.5]
+COORDINATE SYSTEM
+-----------------
+BDC 2025 event data uses the SAME absolute rink coordinate system
+as the tracking data — no transformation required:
 
-The tracking data uses absolute rink coordinates:
   X ∈ [-100, +100]  (centre ice = 0)
   Y ∈ [-42.5, +42.5]
 
-To overlay events on the rink, or to join events with tracking frames,
-we must normalise event coordinates to absolute rink coordinates.
+Confirmed by landmark positions in the data:
+  Faceoff wins cluster at X = {-69, -20, 0, +20, +69}  ← exact rink dots
+  Zone entries cluster at  X = {-25, +25}               ← exact blue lines
+  Y ranges within ±42.5                                 ← exact board width
 
-HOW TO NORMALISE
-----------------
-1. camera_orientations.csv tells us which side the HOME goalie is on
-   in period 1 (i.e. which end the home team defends in period 1).
+ZONE CLASSIFICATION (absolute position)
+----------------------------------------
+  Left Zone    : abs_x < -25
+  Neutral      : -25 ≤ abs_x ≤ 25
+  Right Zone   : abs_x > +25
 
-2. If Home goalie is on the RIGHT side in P1:
-     - Home team DEFENDS the right end  → Home team ATTACKS LEFT (neg X)
-     - Away team ATTACKS RIGHT (pos X)
-
-3. Directions FLIP every period:
-     P1 → base direction
-     P2 → flipped
-     P3 → same as P1
-     OT (P4+) → same as P2 (teams pick ends but convention is flip)
-
-4. For a team attacking in the POSITIVE direction:
-     abs_x = -89 + (event_x / 100) * 178
-     (X=0 maps to -89 [own goal], X=100 maps to +89 [opp goal])
-
-5. For a team attacking in the NEGATIVE direction:
-     abs_x = +89 - (event_x / 100) * 178
-     (X=0 maps to +89 [own goal], X=100 maps to -89 [opp goal])
-
-Y coordinates are already in absolute rink space — no transform needed.
+Because both teams share the rink, "Left/Right Zone" describes where
+on the ice an event occurred, not which team was attacking there.
 """
 
 import sys
@@ -149,36 +132,21 @@ def normalise_events(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add absolute rink coordinate columns to an events DataFrame.
 
-    Input columns required: game_id, team, period, x, y, x2, y2
+    BDC 2025 event coordinates are already in absolute rink space
+    (confirmed: faceoff dots at ±20/±69, blue lines at ±25).
+    No mathematical transformation is needed — abs_x = x.
+
     Added columns:
-        abs_x   absolute X for event location
-        abs_y   same as y (no transform needed)
-        abs_x2  absolute X for secondary location (pass target, etc.)
+        abs_x   same as x  (absolute rink X, −100 → +100)
+        abs_y   same as y  (absolute rink Y, −42.5 → +42.5)
+        abs_x2  same as x2 (secondary location, e.g. pass destination)
         abs_y2  same as y2
-        attacks_positive  direction flag for this row
     """
     df = df.copy()
-
-    attacks_pos = []
-    abs_x_vals  = []
-    abs_x2_vals = []
-
-    for _, row in df.iterrows():
-        pos = team_attacks_positive(
-            str(row.get("game_id", "")),
-            str(row.get("team", "")),
-            int(row["period"]) if pd.notna(row.get("period")) else 1,
-        )
-        attacks_pos.append(pos)
-        abs_x_vals.append(normalise_event_x(row.get("x"),  pos))
-        abs_x2_vals.append(normalise_event_x(row.get("x2"), pos))
-
-    df["attacks_positive"] = attacks_pos
-    df["abs_x"]  = abs_x_vals
+    df["abs_x"]  = df["x"]
     df["abs_y"]  = df["y"]
-    df["abs_x2"] = abs_x2_vals
+    df["abs_x2"] = df["x2"]
     df["abs_y2"] = df["y2"]
-
     return df
 
 
@@ -246,7 +214,7 @@ def add_spatial_features(df: pd.DataFrame) -> pd.DataFrame:
     df["zone"] = pd.cut(
         df["abs_x"],
         bins=[-105, -25, 25, 105],
-        labels=["Defensive", "Neutral", "Offensive"],
+        labels=["Left Zone", "Neutral", "Right Zone"],
     )
     return df
 
